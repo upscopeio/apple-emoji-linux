@@ -1,0 +1,460 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  models: read
+
+jobs:
+  triage-new-issue:
+    if: github.event_name == 'issues' && contains(github.event.issue.body, 'Before you start')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read README
+        id: readme
+        run: |
+          {
+            echo 'content<<READMEEOF'
+            cat README.md
+            echo 'READMEEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Pre-checks
+        id: prechecks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            const title = context.payload.issue.title || '';
+            const issueNumber = context.payload.issue.number;
+
+            // OS / installation method mismatch detection.
+            const osMatch = body.match(/### Operating System \/ Distribution\s*\n\s*(.+)/);
+            const methodMatch = body.match(/### Installation Method\s*\n\s*(.+)/);
+            const os = osMatch ? osMatch[1].trim().toLowerCase() : '';
+            const method = methodMatch ? methodMatch[1].trim() : '';
+
+            const linuxMethods = [
+              '.deb package (Ubuntu / Debian)',
+              '.rpm package (Fedora / RHEL)',
+              '.pkg.tar.zst (Arch Linux)',
+              'Manual install (copied TTF + fontconfig)',
+            ];
+            const windowsMethod = 'Windows (replaced seguiemj.ttf)';
+
+            let mismatch = '';
+            const isWindowsOS = /windows/i.test(os);
+            const isLinuxOS = /ubuntu|debian|fedora|rhel|centos|arch|manjaro|linux|mint|pop|endeavour|gentoo|opensuse|suse/i.test(os);
+
+            if (isWindowsOS && linuxMethods.includes(method)) {
+              mismatch = `OS is "${osMatch[1].trim()}" but installation method is "${method}" which is a Linux-only method. The Windows installation instructions are in a separate section of the README and require replacing seguiemj.ttf.`;
+            } else if (isLinuxOS && method === windowsMethod) {
+              mismatch = `OS is "${osMatch[1].trim()}" but installation method is "${method}" which is Windows-only. They should use the Linux installation instructions from the README.`;
+            }
+
+            // Search for related existing issues.
+            const keywords = title
+              .toLowerCase()
+              .replace(/[^\w\s]/g, ' ')
+              .split(/\s+/)
+              .filter(w => w.length > 3 && !['with', 'from', 'that', 'this', 'have', 'been', 'does', 'dont', 'cant', 'wont', 'into', 'when', 'font', 'emoji', 'apple', 'color', 'install'].includes(w));
+
+            let relatedIssues = '';
+            if (keywords.length > 0) {
+              const query = keywords.slice(0, 4).join(' ');
+              try {
+                const results = await github.rest.search.issuesAndPullRequests({
+                  q: `repo:${context.repo.owner}/${context.repo.repo} is:issue ${query}`,
+                  per_page: 6,
+                  sort: 'updated',
+                  order: 'desc',
+                });
+
+                const related = results.data.items
+                  .filter(i => i.number !== issueNumber)
+                  .slice(0, 5);
+
+                if (related.length > 0) {
+                  relatedIssues = related.map(i =>
+                    `#${i.number} [${i.state}] "${i.title}"`
+                  ).join('\n');
+                }
+              } catch (e) {
+                console.log('Issue search failed:', e.message);
+              }
+            }
+
+            core.setOutput('mismatch', mismatch);
+            core.setOutput('related_issues', relatedIssues);
+
+      - name: Analyze issue
+        id: ai
+        uses: actions/ai-inference@v1
+        with:
+          model: openai/gpt-4o-mini
+          system-prompt: |
+            You are a maintainer of the apple-emoji-ttf project. This project converts
+            Apple Color Emoji to TTF format for Linux and Windows.
+
+            Tone:
+            - Write like a concise project maintainer.
+            - Use contractions where they sound natural.
+            - Do not use em dashes, bullet lists, signoffs, or corporate support phrases.
+            - Keep the reply warm, plain, and brief.
+
+            Keep it to 2-4 short sentences max. Get to the point.
+
+            Your job is to analyze a new GitHub issue and determine what kind of issue it is.
+
+            Below is the project's full README.md. Use this as your knowledge base to
+            answer questions and identify user errors vs real bugs. When directing users
+            to specific instructions, refer to the relevant section of the README.
+
+            <readme>
+            ${{ steps.readme.outputs.content }}
+            </readme>
+
+            ANALYSIS STEPS:
+
+            1. Check if there is an OS/method mismatch flagged below. If so, the user
+               picked the wrong installation method for their OS.
+
+            2. Read the issue carefully. Pay close attention to the EXACT steps the
+               user describes. Compare those specific steps against the README's
+               instructions for their OS. Did they follow the correct process?
+               DO NOT assume or guess what the user did. Only respond to what they
+               actually wrote. If they say they used Settings > Fonts, don't say
+               they double-clicked. If they say they copied the file, don't say
+               they used a package manager. Be precise about their situation.
+
+            3. If you're confident the user didn't read or follow the README instructions,
+               output ACTION:close on its own line. In your comment:
+               - Briefly explain what they should actually do (based on the README)
+               - Point them to the README instructions before trying again. Examples:
+                 "Give the README a read first, it covers exactly this."
+                 "The README walks through the whole process, worth a look before diving in."
+               - Mention related issues if any are listed below
+
+            4. If this IS a genuine bug (something not covered by the README, actual
+               unexpected behavior after correctly following instructions), output
+               LABEL:bug on its own line. Do NOT output ACTION:close for genuine bugs.
+
+            5. If this is a genuine feature request, output LABEL:enhancement on its
+               own line.
+
+            NEVER output LABEL:bug together with ACTION:close.
+            NEVER output LABEL:bug if your comment explains it's expected behavior or user error.
+
+            RESPONSE FORMAT:
+            Line 1: COMMENT: followed by your reply text
+            Line 2 (optional, pick ONE): LABEL:bug OR LABEL:enhancement OR ACTION:close
+
+            Below are format-only examples showing the structure. DO NOT copy or
+            paraphrase these. Write your own original response based on the actual
+            issue content. Vary your phrasing every time.
+
+            Example 1 (user error, close):
+            COMMENT: [your original reply explaining what went wrong and what to do]
+            ACTION:close
+
+            Example 2 (real bug):
+            COMMENT: [your original reply acknowledging the bug]
+            LABEL:bug
+
+            Example 3 (feature request):
+            COMMENT: [your original reply about the feature idea]
+            LABEL:enhancement
+          prompt: |
+            Issue title: ${{ github.event.issue.title }}
+
+            Issue body:
+            ${{ github.event.issue.body }}
+
+            --- Pre-check results ---
+
+            OS / Installation method mismatch: ${{ steps.prechecks.outputs.mismatch || 'none' }}
+
+            Related existing issues:
+            ${{ steps.prechecks.outputs.related_issues || 'none found' }}
+
+      - name: Parse response and apply
+        uses: actions/github-script@v7
+        env:
+          RESPONSE: ${{ steps.ai.outputs.response }}
+        with:
+          script: |
+            const response = process.env.RESPONSE || '';
+            const issue = context.payload.issue;
+            const issueNumber = issue.number;
+            const username = issue.user.login;
+            const body = (issue.body || '').toLowerCase();
+            const title = (issue.title || '').toLowerCase();
+
+            // Extract comment
+            const commentMatch = response.match(/COMMENT:\s*([\s\S]*?)(?=\n(?:LABEL|ACTION):|$)/);
+            let comment = commentMatch ? commentMatch[1].trim() : '';
+
+            if (!comment) {
+              const fallback = response.replace(/\n?(?:LABEL|ACTION):\s*\w[\w-]*/gi, '').trim();
+              if (fallback) comment = fallback;
+            }
+
+            // Check for signals
+            let isBug = /LABEL:\s*bug/i.test(response);
+            const isEnhancement = /LABEL:\s*enhancement/i.test(response);
+            const shouldClose = /ACTION:\s*close/i.test(response);
+
+            // Safeguard: override bug label for known Windows non-bugs
+            const windowsKeywords = /invalid|not.{0,5}valid|can.?t.{0,10}(install|open|preview)|corrupt|broken.{0,5}file|not.{0,5}a.{0,5}valid.{0,5}font/i;
+            const isWindows = /windows/i.test(body) || /windows/i.test(title);
+            if (isBug && isWindows && windowsKeywords.test(body + ' ' + title)) {
+              console.log('Safeguard: stripping bug label, Windows invalid font is expected behavior');
+              isBug = false;
+            }
+
+            // Safeguard: if the comment itself says "expected", don't label as bug
+            if (isBug && /expected|not a bug|known (issue|limitation)|user error/i.test(comment)) {
+              console.log('Safeguard: stripping bug label, comment indicates expected behavior');
+              isBug = false;
+            }
+
+            // Safeguard: never label bug AND close
+            if (isBug && shouldClose) {
+              console.log('Safeguard: stripping bug label, ACTION:close takes precedence');
+              isBug = false;
+            }
+
+            // Post comment
+            if (comment) {
+              comment = `@${username} ${comment}`;
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: issueNumber,
+                body: comment,
+              });
+            }
+
+            // Apply labels
+            const labels = [];
+            if (isBug) labels.push('bug');
+            if (isEnhancement) labels.push('enhancement');
+
+            if (labels.length > 0) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: issueNumber,
+                labels,
+              });
+            }
+
+            // Close invalid reports.
+            if (shouldClose) {
+              await github.rest.issues.addLabels({
+                ...context.repo,
+                issue_number: issueNumber,
+                labels: ['invalid'],
+              });
+
+              await github.rest.issues.update({
+                ...context.repo,
+                issue_number: issueNumber,
+                state: 'closed',
+                state_reason: 'not_planned',
+              });
+            }
+
+  reply-to-comment:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.comment.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read README
+        id: readme
+        run: |
+          {
+            echo 'content<<READMEEOF'
+            cat README.md
+            echo 'READMEEOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check if reply is needed
+        id: should-reply
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const comment = context.payload.comment;
+            const commenter = comment.user.login;
+
+            // Fetch all comments
+            const comments = await github.rest.issues.listComments({
+              ...context.repo,
+              issue_number: issue.number,
+              per_page: 50,
+            });
+
+            const allComments = comments.data;
+            const thisComment = comment.body || '';
+
+            // Determine if the comment is part of a user-to-user conversation.
+
+            // Get unique human participants.
+            const humanParticipants = new Set();
+            humanParticipants.add(issue.user.login); // issue author
+            for (const c of allComments) {
+              if (c.user.login !== 'github-actions[bot]') {
+                humanParticipants.add(c.user.login);
+              }
+            }
+
+            // Check explicit mentions.
+            const mentionedUsers = (thisComment.match(/@[\w-]+/g) || [])
+              .map(m => m.slice(1));
+            const mentionsHuman = mentionedUsers.some(u =>
+              u !== 'github-actions[bot]' && humanParticipants.has(u)
+            );
+
+            // Check if this looks like a reply to a previous human comment.
+            const humanComments = allComments.filter(c =>
+              c.user.login !== 'github-actions[bot]'
+            );
+            const otherHumanComments = humanComments.filter(c =>
+              c.user.login !== commenter
+            );
+
+            // If someone mentions another participant, skip.
+            if (mentionsHuman) {
+              core.setOutput('skip', 'true');
+              core.setOutput('reason', 'Comment mentions another user');
+              return;
+            }
+
+            // If there are other human participants who have commented, and this
+            // commenter is replying (not the issue author, or there are replies
+            // from non-authors), check if it looks conversational
+            if (otherHumanComments.length > 0) {
+              const isShort = thisComment.length < 200;
+              const hasQuestion = thisComment.includes('?');
+              const looksConversational = isShort && !hasQuestion;
+
+              if (looksConversational) {
+                core.setOutput('skip', 'true');
+                core.setOutput('reason', 'Looks like a conversational reply between users');
+                return;
+              }
+            }
+
+            // Build thread context.
+            const thread = allComments.map(c =>
+              `[${c.user.login}]: ${c.body}`
+            ).join('\n---\n');
+
+            const result = [
+              `Issue title: ${issue.title}`,
+              `Issue author: ${issue.user.login}`,
+              `Issue body:\n${issue.body}`,
+              `\nConversation so far:\n${thread}`,
+              `\nNew comment by ${commenter}:\n${thisComment}`,
+            ].join('\n\n');
+
+            core.setOutput('skip', 'false');
+            core.setOutput('thread', result);
+
+      - name: Analyze follow-up
+        if: steps.should-reply.outputs.skip != 'true'
+        id: ai
+        uses: actions/ai-inference@v1
+        with:
+          model: openai/gpt-4o-mini
+          system-prompt: |
+            You are a maintainer of the apple-emoji-ttf project. This project converts
+            Apple Color Emoji to TTF format for Linux and Windows.
+
+            A user has left a follow-up comment on an issue. You have the full issue body
+            and conversation history.
+
+            Below is the project's full README.md. Use this as your primary knowledge
+            base when answering questions. When directing users to instructions, refer
+            to the relevant section of the README.
+
+            <readme>
+            ${{ steps.readme.outputs.content }}
+            </readme>
+
+            Reply policy:
+
+            You must figure out WHO the commenter is talking to based on context:
+
+            1. If the comment is replying to or continuing a conversation with another
+               human user (not the bot), respond with NO_REPLY. Users talk to each other
+               in issues. Don't butt in.
+            2. If the comment is answering a question that was asked by someone else
+               earlier in the thread, respond with NO_REPLY.
+            3. If the comment is a general question that isn't directed at anyone specific,
+               and you can answer it using the README, go ahead and answer.
+            4. If you're not confident in the answer, or it requires maintainer judgement
+               (for example design decisions, timeline questions, whether something will be
+               supported), respond with NO_REPLY.
+
+            Also respond with NO_REPLY for:
+            - "thanks", "+1", "same here", acknowledgements, reactions, emoji-only
+            - Comments where the user confirms the fix worked or says the issue is resolved
+
+            Tone:
+            - Write like a concise project maintainer.
+            - Use contractions where they sound natural.
+            - Do not use em dashes, bullet lists, signoffs, or corporate support phrases.
+            - Keep the reply warm, plain, and brief.
+
+            Keep it to 1-3 short sentences max. Get to the point.
+
+            Format your response as:
+            COMMENT:<your comment here>
+            or
+            NO_REPLY
+          prompt: |
+            ${{ steps.should-reply.outputs.thread }}
+
+      - name: Post reply if needed
+        if: steps.should-reply.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        env:
+          RESPONSE: ${{ steps.ai.outputs.response }}
+        with:
+          script: |
+            const response = process.env.RESPONSE || '';
+
+            if (/^\s*NO_REPLY\s*$/i.test(response)) return;
+
+            // Try COMMENT: prefix first, fall back to full response
+            const commentMatch = response.match(/COMMENT:\s*([\s\S]*?)$/);
+            let comment = commentMatch ? commentMatch[1].trim() : '';
+
+            if (!comment) {
+              const fallback = response.trim();
+              if (fallback && !/NO_REPLY/i.test(fallback)) comment = fallback;
+            }
+
+            if (!comment) return;
+
+            const username = context.payload.comment.user.login;
+            comment = `@${username} ${comment}`;
+
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: context.payload.issue.number,
+              body: comment,
+            });

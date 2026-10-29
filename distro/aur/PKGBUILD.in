@@ -1,0 +1,30 @@
+# Maintainer: samuelngs <samuelngs@users.noreply.github.com>
+# Upstream: https://github.com/samuelngs/apple-emoji-ttf
+
+pkgname=ttf-apple-emoji
+pkgver={{AUR_PKGVER}}
+_pkgver={{RELEASE_TAG}}
+pkgrel=1
+pkgdesc="Brings Apple's vibrant color emojis to Linux."
+url='https://github.com/samuelngs/apple-emoji-ttf'
+license=('custom')
+arch=('any')
+provides=('emoji-font')
+source=(
+  "AppleColorEmoji-Linux.ttf::${url}/releases/download/${_pkgver}/AppleColorEmoji-Linux.ttf"
+  '75-apple-color-emoji.conf'
+)
+sha256sums=(
+  '{{FONT_SHA256}}'
+  '{{AUR_CONFIG_SHA256}}'
+)
+
+package() {
+  install -Dm644 "$srcdir/AppleColorEmoji-Linux.ttf" \
+    "${pkgdir}/usr/share/fonts/apple-color-emoji/apple-color-emoji.ttf"
+  install -Dm644 -t "${pkgdir}/usr/share/fontconfig/conf.avail" \
+    "$srcdir/75-apple-color-emoji.conf"
+  install -d "${pkgdir}/etc/fonts/conf.d"
+  ln -s "/usr/share/fontconfig/conf.avail/75-apple-color-emoji.conf" \
+    "${pkgdir}/etc/fonts/conf.d/"
+}
